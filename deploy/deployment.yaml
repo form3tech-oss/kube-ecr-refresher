@@ -1,0 +1,36 @@
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  labels:
+    app: kube-ecr-refresher
+  name: kube-ecr-refresher
+  namespace: kube-ecr-refresher
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: kube-ecr-refresher
+  template:
+    metadata:
+      labels:
+        app: kube-ecr-refresher
+    spec:
+      containers:
+      - name: kube-ecr-refresher
+        image: form3tech/kube-ecr-refresher:latest
+        envFrom:
+        - secretRef:
+            name: kube-ecr-refresher
+        securityContext:
+          allowPrivilegeEscalation: false
+          capabilities:
+            drop:
+            - ALL
+          readOnlyRootFilesystem: true
+          runAsGroup: 65534
+          runAsNonRoot: true
+          runAsUser: 65534
+      securityContext:
+        fsGroup: 65534
+      serviceAccountName: kube-ecr-refresher
