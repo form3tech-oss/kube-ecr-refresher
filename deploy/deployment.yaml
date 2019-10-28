@@ -18,7 +18,7 @@ spec:
     spec:
       containers:
       - name: kube-ecr-refresher
-        image: form3tech/kube-ecr-refresher:latest
+        image: form3tech/kube-ecr-refresher:1.0.0
         envFrom:
         - secretRef:
             name: kube-ecr-refresher
