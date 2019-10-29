@@ -11,4 +11,3 @@ USER nobody:nobody
 WORKDIR /
 COPY --from=builder /kube-ecr-refresher /kube-ecr-refresher
 ENTRYPOINT ["/kube-ecr-refresher"]
-CMD ["--help"]
