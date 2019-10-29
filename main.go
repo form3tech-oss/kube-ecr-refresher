@@ -19,6 +19,7 @@ import (
 	"io/ioutil"
 	"os"
 	"os/signal"
+	"reflect"
 	"strings"
 	"sync"
 	"syscall"
@@ -76,10 +77,10 @@ func createOrUpdateSecret(k kubernetes.Interface, targetNamespace string, d *ref
 	}
 	s := v.(*corev1.Secret)
 	// Attempt to create the secret, falling back to updating it in case it already exists.
-	log.Tracef(`Attempting to create secret "%s/%s"`, targetNamespace, s.Name)
+	log.Debugf(`Attempting to create secret "%s/%s"`, targetNamespace, s.Name)
 	if _, err := k.CoreV1().Secrets(targetNamespace).Create(s); err != nil {
 		if errors.IsAlreadyExists(err) {
-			log.Tracef(`Secret "%s/%s" already exists`, targetNamespace, s.Name)
+			log.Debugf(`Secret "%s/%s" already exists`, targetNamespace, s.Name)
 			return updateSecret(k, targetNamespace, s)
 		}
 		return nil
@@ -116,6 +117,15 @@ func main() {
 		log.Fatalf("Failed to build Amazon ECR authentication data refresher: %v", err)
 	}
 	go r.Run()
+
+	// Wait until the Amazon ECR authentication data is first refreshed.
+	for {
+		if _, err := r.Get(); err == nil {
+			break
+		}
+		log.Debugf("Waiting for Amazon ECR authentication data to be refreshed")
+		time.Sleep(5*time.Second)
+	}
 
 	// Setup a signal handler for SIGINT and SIGTERM so we can gracefully shutdown when requested to.
 	c := make(chan os.Signal, 1)
@@ -166,10 +176,14 @@ func createOrUpdateSecrets(r *refresher.AmazonECRAuthenticationDataRefresher, k 
 
 // updateSecret updates the target secret with the updated Docker credentials.
 func updateSecret(k kubernetes.Interface, targetNamespace string, s *corev1.Secret) error {
-	log.Tracef(`Attempting to update existing secret "%s/%s"`, targetNamespace, s.Name)
+	log.Debugf(`Attempting to update existing secret "%s/%s"`, targetNamespace, s.Name)
 	v, err := k.CoreV1().Secrets(targetNamespace).Get(s.Name, metav1.GetOptions{})
 	if err != nil {
 		return err
+	}
+	if reflect.DeepEqual(v.Data, s.Data) {
+		log.Debugf(`Secret "%s/%s" is up-to-date`, v.Namespace, v.Name)
+		return nil
 	}
 	v.Data = s.Data
 	if _, err := k.CoreV1().Secrets(v.Namespace).Update(v); err != nil {

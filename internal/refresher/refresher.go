@@ -67,13 +67,13 @@ func (r *AmazonECRAuthenticationDataRefresher) Run() {
 			log.Errorf("Failed to refresh Amazon ECR authentication data: %v", err)
 			r.current = nil
 			u := time.Now().Add(1 * time.Minute)
-			log.Debugf("Sleeping until %s", u.Format(time.RFC3339))
+			log.Debugf("Holding on refreshing Amazon ECR authentication data until %s", u.Format(time.RFC3339))
 			time.Sleep(time.Until(u))
 		} else {
-			log.Info("Amazon ECR authentication data refreshed")
+			log.Debug("Amazon ECR authentication data refreshed")
 			r.current = d
 			u := d.expiration.Add(-1 * time.Minute)
-			log.Debugf("Sleeping until %s", u.Format(time.RFC3339))
+			log.Debugf("Holding on refreshing Amazon ECR authentication data until %s", u.Format(time.RFC3339))
 			time.Sleep(time.Until(u))
 		}
 	}
