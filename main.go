@@ -31,7 +31,7 @@ import (
 	"k8s.io/client-go/kubernetes"
 	"k8s.io/client-go/tools/clientcmd"
 	"k8s.io/klog"
-	"k8s.io/kubernetes/pkg/kubectl/generate/versioned"
+	"k8s.io/kubectl/pkg/generate/versioned"
 
 	"github.com/form3tech-oss/kube-ecr-refresher/internal/refresher"
 )
