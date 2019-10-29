@@ -24,7 +24,7 @@ install-deps: install-golangci-lint
 
 .PHONY: lint
 lint:
-	golangci-lint run ./... --enable-all --disable lll --deadline 5m
+	golangci-lint run ./... --enable-all --disable lll,wsl --deadline 5m
 
 .PHONY: skaffold
 skaffold:

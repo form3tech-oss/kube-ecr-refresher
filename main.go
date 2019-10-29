@@ -15,20 +15,16 @@
 package main
 
 import (
-	"encoding/base64"
 	"flag"
-	"fmt"
 	"io/ioutil"
 	"os"
 	"os/signal"
+	"reflect"
 	"strings"
 	"sync"
 	"syscall"
 	"time"
 
-	"github.com/aws/aws-sdk-go/aws/session"
-	"github.com/aws/aws-sdk-go/service/ecr"
-	"github.com/aws/aws-sdk-go/service/ecr/ecriface"
 	log "github.com/sirupsen/logrus"
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/errors"
@@ -36,15 +32,10 @@ import (
 	"k8s.io/client-go/kubernetes"
 	"k8s.io/client-go/tools/clientcmd"
 	"k8s.io/klog"
-	"k8s.io/kubernetes/pkg/kubectl/generate/versioned"
-)
+	"k8s.io/kubectl/pkg/generate/versioned"
 
-// amazonECRAuthenticationData is a wrapper for authentication data for an Amazon ECR registry.
-type amazonECRAuthenticationData struct {
-	server   string
-	password string
-	username string
-}
+	"github.com/form3tech-oss/kube-ecr-refresher/internal/refresher"
+)
 
 // buildNamespacesList takes a comma-separated list of namespace names (or "") and converts that into a list of namespace names.
 func buildNamespacesList(k kubernetes.Interface, targetNamespaces string) ([]string, error) {
@@ -72,24 +63,24 @@ func createKubeClient(pathToKubeconfig string) (kubernetes.Interface, error) {
 }
 
 // createOrUpdateSecret creates or updates a secret in the specified namespace containing the required Docker credentials.
-func createOrUpdateSecret(k kubernetes.Interface, targetNamespace string, d *amazonECRAuthenticationData) error {
+func createOrUpdateSecret(k kubernetes.Interface, targetNamespace string, d *refresher.AmazonECRAuthenticationData) error {
 	// Create a 'Secret' object with the desired contents.
 	v, err := (versioned.SecretForDockerRegistryGeneratorV1{
-		Name:     d.server, // Use the server name as the name of the secret.
-		Username: d.username,
+		Name:     d.Server, // Use the server name as the name of the secret.
+		Username: d.Username,
 		Email:    "none",
-		Password: d.password,
-		Server:   d.server,
+		Password: d.Password,
+		Server:   d.Server,
 	}).StructuredGenerate()
 	if err != nil {
 		return err
 	}
 	s := v.(*corev1.Secret)
 	// Attempt to create the secret, falling back to updating it in case it already exists.
-	log.Tracef(`Attempting to create secret "%s/%s"`, targetNamespace, s.Name)
+	log.Debugf(`Attempting to create secret "%s/%s"`, targetNamespace, s.Name)
 	if _, err := k.CoreV1().Secrets(targetNamespace).Create(s); err != nil {
 		if errors.IsAlreadyExists(err) {
-			log.Tracef(`Secret "%s/%s" already exists`, targetNamespace, s.Name)
+			log.Debugf(`Secret "%s/%s" already exists`, targetNamespace, s.Name)
 			return updateSecret(k, targetNamespace, s)
 		}
 		return nil
@@ -98,33 +89,12 @@ func createOrUpdateSecret(k kubernetes.Interface, targetNamespace string, d *ama
 	return nil
 }
 
-// getAmazonECRAuthenticationData returns authentication data for the target Amazon ECR registry.
-func getAmazonECRAuthenticationData(e ecriface.ECRAPI) (*amazonECRAuthenticationData, error) {
-	o, err := e.GetAuthorizationToken(&ecr.GetAuthorizationTokenInput{})
-	if err != nil {
-		return nil, err
-	}
-	if len(o.AuthorizationData) != 1 {
-		return nil, fmt.Errorf("expected a single result (got %d)", len(o.AuthorizationData))
-	}
-	s := strings.TrimPrefix(*o.AuthorizationData[0].ProxyEndpoint, "https://")
-	v, err := base64.StdEncoding.DecodeString(*o.AuthorizationData[0].AuthorizationToken)
-	if err != nil {
-		return nil, err
-	}
-	t := strings.Split(string(v), ":")
-	if len(t) != 2 {
-		return nil, fmt.Errorf("aws returned a malformed token")
-	}
-	return &amazonECRAuthenticationData{server: s, password: t[1], username: t[0]}, nil
-}
-
 func main() {
 	// Parse command-line flags.
 	logLevel := flag.String("log-level", log.InfoLevel.String(), "the log level to use")
 	pathToKubeconfig := flag.String("path-to-kubeconfig", "", "the path to the kubeconfig file to use")
-	refreshInterval := flag.Duration("refresh-interval", time.Duration(12)*time.Hour, "the interval at which to refresh the secrets")
-	targetNamespaces := flag.String("target-namespaces", corev1.NamespaceAll, "the comma-separated list of namespaces in which to create the secrets")
+	refreshInterval := flag.Duration("refresh-interval", time.Duration(10)*time.Second, "the interval at which to refresh the list of namespaces and create/update secrets")
+	targetNamespaces := flag.String("target-namespaces", corev1.NamespaceAll, "the comma-separated list of namespaces in which to create/update secrets")
 	flag.Parse()
 
 	// Configure logging.
@@ -141,35 +111,44 @@ func main() {
 		log.Fatalf("Failed to build Kubernetes client: %v", err)
 	}
 
-	// Initialize the Amazon ECR client.
-	s, err := session.NewSession()
+	// Create and start an Amazon ECR authentication data refresher.
+	r, err := refresher.New()
 	if err != nil {
-		log.Fatalf("Failed to initialize AWS session: %v", err)
+		log.Fatalf("Failed to build Amazon ECR authentication data refresher: %v", err)
 	}
-	e := ecr.New(s)
+	go r.Run()
+
+	// Wait until the Amazon ECR authentication data is first refreshed.
+	for {
+		if _, err := r.Get(); err == nil {
+			break
+		}
+		log.Debugf("Waiting for Amazon ECR authentication data to be refreshed")
+		time.Sleep(5 * time.Second)
+	}
 
 	// Setup a signal handler for SIGINT and SIGTERM so we can gracefully shutdown when requested to.
 	c := make(chan os.Signal, 1)
 	signal.Notify(c, syscall.SIGINT, syscall.SIGTERM)
 
-	// Refresh the target secrets everytime the specified refresh interval elapses.
+	// Refresh the target secrets every time the specified refresh interval elapses.
 	t := time.NewTicker(*refreshInterval)
 	defer t.Stop()
-	createOrUpdateSecrets(e, k, *targetNamespaces)
+	createOrUpdateSecrets(r, k, *targetNamespaces)
 	for {
 		select {
 		case <-c:
 			return
 		case <-t.C:
-			createOrUpdateSecrets(e, k, *targetNamespaces)
+			createOrUpdateSecrets(r, k, *targetNamespaces)
 		}
 	}
 }
 
 // createOrUpdateSecrets creates or updates secrets containing Docker credentials in each of the target namespaces.
-func createOrUpdateSecrets(e ecriface.ECRAPI, k kubernetes.Interface, targetNamespaces string) {
-	// Get the authorization token for the default registry
-	d, err := getAmazonECRAuthenticationData(e)
+func createOrUpdateSecrets(r *refresher.AmazonECRAuthenticationDataRefresher, k kubernetes.Interface, targetNamespaces string) {
+	// Get the authorization data from the Amazon ECR authentication data refresher.
+	d, err := r.Get()
 	if err != nil {
 		log.Errorf("Failed to get Amazon ECR authentication data: %v", err)
 		return
@@ -197,10 +176,14 @@ func createOrUpdateSecrets(e ecriface.ECRAPI, k kubernetes.Interface, targetName
 
 // updateSecret updates the target secret with the updated Docker credentials.
 func updateSecret(k kubernetes.Interface, targetNamespace string, s *corev1.Secret) error {
-	log.Tracef(`Attempting to update existing secret "%s/%s"`, targetNamespace, s.Name)
+	log.Debugf(`Attempting to update existing secret "%s/%s"`, targetNamespace, s.Name)
 	v, err := k.CoreV1().Secrets(targetNamespace).Get(s.Name, metav1.GetOptions{})
 	if err != nil {
 		return err
+	}
+	if reflect.DeepEqual(v.Data, s.Data) {
+		log.Debugf(`Secret "%s/%s" is up-to-date`, v.Namespace, v.Name)
+		return nil
 	}
 	v.Data = s.Data
 	if _, err := k.CoreV1().Secrets(v.Namespace).Update(v); err != nil {
