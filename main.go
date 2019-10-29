@@ -124,7 +124,7 @@ func main() {
 			break
 		}
 		log.Debugf("Waiting for Amazon ECR authentication data to be refreshed")
-		time.Sleep(5*time.Second)
+		time.Sleep(5 * time.Second)
 	}
 
 	// Setup a signal handler for SIGINT and SIGTERM so we can gracefully shutdown when requested to.
